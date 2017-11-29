@@ -1,35 +1,33 @@
 package me.postaddict.instagram.scraper;
 
-import com.google.gson.Gson;
-import me.postaddict.instagram.scraper.domain.*;
+import lombok.AllArgsConstructor;
 import me.postaddict.instagram.scraper.exception.InstagramAuthException;
+import me.postaddict.instagram.scraper.mapper.Mapper;
+import me.postaddict.instagram.scraper.mapper.ModelMapper;
+import me.postaddict.instagram.scraper.model.*;
+import me.postaddict.instagram.scraper.request.*;
+import me.postaddict.instagram.scraper.request.parameters.*;
 import okhttp3.*;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 
+@AllArgsConstructor
 public class Instagram implements AuthenticatedInsta {
 
-    public OkHttpClient httpClient;
-    public Gson gson;
+    private static final PageInfo FIRST_PAGE = new PageInfo(true, "");
+    protected final OkHttpClient httpClient;
+    protected final Mapper mapper;
+    protected final DelayHandler delayHandler;
 
     public Instagram(OkHttpClient httpClient) {
-        this.httpClient = httpClient;
-        this.gson = new Gson();
+        this(httpClient, new ModelMapper(), new DefaultDelayHandler());
     }
 
     private Request withCsrfToken(Request request) {
         List<Cookie> cookies = httpClient.cookieJar()
                 .loadForRequest(request.url());
-        for (Iterator<Cookie> iterator = cookies.iterator(); iterator.hasNext(); ) {
-            Cookie cookie = iterator.next();
-            if (!cookie.name().equals("csrftoken")) {
-                iterator.remove();
-            }
-        }
+        cookies.removeIf(cookie -> !cookie.name().equals("csrftoken"));
         if (!cookies.isEmpty()) {
             Cookie cookie = cookies.get(0);
             return request.newBuilder()
@@ -60,7 +58,7 @@ public class Instagram implements AuthenticatedInsta {
 
         Request request = new Request.Builder()
                 .url(Endpoint.LOGIN_URL)
-                .header("Referer", Endpoint.BASE_URL + "/")
+                .header(Endpoint.REFERER, Endpoint.BASE_URL + "/")
                 .post(formBody)
                 .build();
 
@@ -71,64 +69,26 @@ public class Instagram implements AuthenticatedInsta {
     public Account getAccountById(long id) throws IOException {
         Request request = new Request.Builder()
                 .url(Endpoint.getAccountJsonInfoLinkByAccountId(id))
-                .header("Referer", Endpoint.BASE_URL + "/")
+                .header(Endpoint.REFERER, Endpoint.BASE_URL + "/")
                 .build();
         Response response = this.httpClient.newCall(withCsrfToken(request)).execute();
-        String jsonString = response.body().string();
-        response.body().close();
-
-        Map userJson = gson.fromJson(jsonString, Map.class);
-        String shortCode = (String) ((Map) ((Map) ((List) ((Map) ((Map) ((Map) userJson.get("data")).get("user")).get("edge_owner_to_timeline_media")).get("edges")).get(0)).get("node")).get("shortcode");
-        Media m = getMediaByCode(shortCode);
-        return m.owner;
+        try (ResponseBody body = response.body()){
+            return getMediaByCode(mapper.getLastMediaShortCode(body.byteStream())).getOwner();
+        }
     }
 
     public Account getAccountByUsername(String username) throws IOException {
-        Request request = new Request.Builder()
-                .url(Endpoint.getAccountJsonInfoLinkByUsername(username))
-                .build();
-
-        Response response = this.httpClient.newCall(request).execute();
-        String jsonString = response.body().string();
-        response.body().close();
-
-        Map userJson = gson.fromJson(jsonString, Map.class);
-        return Account.fromAccountPage((Map) userJson.get("user"));
+        return getAccount(username, 1, FIRST_PAGE);
     }
 
-    public List<Media> getMedias(String username, int count) throws IOException {
-        int index = 0;
-        ArrayList<Media> medias = new ArrayList<Media>();
-        String maxId = "";
-        boolean isMoreAvailable = true;
+    public PageObject<Media> getMedias(String username, int pageCount) throws IOException {
+        Account account = getAccount(username, pageCount, FIRST_PAGE);
+        return account!=null? account.getMedia() : null;
+    }
 
-        while (index < count && isMoreAvailable) {
-            Request request = new Request.Builder()
-                    .url(Endpoint.getAccountMediasJsonLink(username, maxId))
-                    .build();
-
-            Response response = this.httpClient.newCall(request).execute();
-            String jsonString = response.body().string();
-            response.body().close();
-
-            Map map = gson.fromJson(jsonString, Map.class);
-            Map userMap = (Map) map.get("user");
-            List items = (List) (((Map) userMap.get("media")).get("nodes"));
-
-            for (Object item : items) {
-                if (index == count) {
-                    return medias;
-                }
-                index++;
-                Map mediaMap = (Map) item;
-                Media media = Media.fromApi(mediaMap);
-                media.owner = Account.fromAccountPage(userMap);
-                medias.add(media);
-                maxId = media.id;
-            }
-            isMoreAvailable = (Boolean) ((Map) (((Map) userMap.get("media")).get("page_info"))).get("has_next_page");
-        }
-        return medias;
+    public Account getAccount(String username, int pageCount, PageInfo pageCursor) throws IOException {
+        GetAccountRequest getAccountRequest = new GetAccountRequest(httpClient, mapper, delayHandler);
+        return getAccountRequest.requestInstagramResult(new UsernameParameter(username), pageCount, pageCursor);
     }
 
     public Media getMediaByUrl(String url) throws IOException {
@@ -137,11 +97,9 @@ public class Instagram implements AuthenticatedInsta {
                 .build();
 
         Response response = this.httpClient.newCall(request).execute();
-        String jsonString = response.body().string();
-        response.body().close();
-
-        Map pageMap = gson.fromJson(jsonString, Map.class);
-        return Media.fromMediaPage((Map) ((Map) pageMap.get("graphql")).get("shortcode_media"));
+        try (ResponseBody responseBody = response.body()){
+            return mapper.mapMedia(responseBody.byteStream());
+        }
     }
 
     public Media getMediaByCode(String code) throws IOException {
@@ -154,142 +112,33 @@ public class Instagram implements AuthenticatedInsta {
                 .build();
 
         Response response = this.httpClient.newCall(request).execute();
-        String jsonString = response.body().string();
-        response.body().close();
-
-        Map tagJson = gson.fromJson(jsonString, Map.class);
-        return Tag.fromSearchPage((Map) tagJson.get("tag"));
+        try (ResponseBody responseBody = response.body()){
+            return mapper.mapTag(responseBody.byteStream());
+        }
 
     }
 
-    public List<Media> getLocationMediasById(String locationId, int count) throws IOException {
-        int index = 0;
-        ArrayList<Media> medias = new ArrayList<Media>();
-        String offset = "";
-        boolean hasNext = true;
-
-        while (index < count && hasNext) {
-            Request request = new Request.Builder()
-                    .url(Endpoint.getMediasJsonByLocationIdLink(locationId, offset))
-                    .header("Referer", Endpoint.BASE_URL + "/")
-                    .build();
-
-            Response response = this.httpClient.newCall(withCsrfToken(request)).execute();
-            String jsonString = response.body().string();
-            response.body().close();
-
-            Map locationMap = gson.fromJson(jsonString, Map.class);
-            List nodes = (List) ((Map) ((Map) locationMap.get("location")).get("media")).get("nodes");
-            for (Object node : nodes) {
-                if (index == count) {
-                    return medias;
-                }
-                index++;
-                Map mediaMap = (Map) node;
-                Media media = Media.fromTagPage(mediaMap);
-                media.location = Location.fromLocationMedias((Map)locationMap.get("location"));
-                medias.add(media);
-            }
-            hasNext = (Boolean) ((Map) ((Map) ((Map) locationMap.get("location")).get("media")).get("page_info")).get("has_next_page");
-            offset = (String) ((Map) ((Map) ((Map) locationMap.get("location")).get("media")).get("page_info")).get("end_cursor");
-        }
-        return medias;
+    public Location getLocationMediasById(String locationId, int pageCount) throws IOException {
+        GetLocationRequest getLocationRequest = new GetLocationRequest(httpClient, mapper, delayHandler);
+        return getLocationRequest.requestInstagramResult(new LocationParameter(locationId), pageCount, FIRST_PAGE);
     }
 
-    public List<Media> getMediasByTag(String tag, int count) throws IOException {
-        int index = 0;
-        ArrayList<Media> medias = new ArrayList<Media>();
-        String maxId = "";
-        boolean hasNext = true;
-
-        while (index < count && hasNext) {
-            Request request = new Request.Builder()
-                    .url(Endpoint.getMediasJsonByTagLink(tag, maxId))
-                    .header("Referer", Endpoint.BASE_URL + "/")
-                    .build();
-
-            Response response = this.httpClient.newCall(withCsrfToken(request)).execute();
-            String jsonString = response.body().string();
-            response.body().close();
-
-            Map tagMap = gson.fromJson(jsonString, Map.class);
-            List nodes = (List) ((Map) ((Map) tagMap.get("tag")).get("media")).get("nodes");
-            for (Object node : nodes) {
-                if (index == count) {
-                    return medias;
-                }
-                index++;
-                Map mediaMap = (Map) node;
-                Media media = Media.fromTagPage(mediaMap);
-                medias.add(media);
-            }
-            hasNext = (Boolean) ((Map) ((Map) ((Map) tagMap.get("tag")).get("media")).get("page_info")).get("has_next_page");
-            maxId = (String) ((Map) ((Map) ((Map) tagMap.get("tag")).get("media")).get("page_info")).get("end_cursor");
-        }
-        return medias;
+    public Tag getMediasByTag(String tag, int pageCount) throws IOException {
+        GetMediaByTagRequest getMediaByTagRequest = new GetMediaByTagRequest(httpClient, mapper, delayHandler);
+        return getMediaByTagRequest.requestInstagramResult(new TagName(tag), pageCount, FIRST_PAGE);
     }
 
-    public List<Media> getTopMediasByTag(String tag) throws IOException {
-        ArrayList<Media> medias = new ArrayList<Media>();
-        String maxId = "";
-
-        Request request = new Request.Builder()
-                .url(Endpoint.getMediasJsonByTagLink(tag, maxId))
-                .header("Referer", Endpoint.BASE_URL + "/")
-                .build();
-
-        Response response = this.httpClient.newCall(withCsrfToken(request)).execute();
-        String jsonString = response.body().string();
-        response.body().close();
-
-        Map tagMap = gson.fromJson(jsonString, Map.class);
-        List nodes = (List) ((Map) ((Map) tagMap.get("tag")).get("top_posts")).get("nodes");
-        for (Object node : nodes) {
-            Map mediaMap = (Map) node;
-            Media media = Media.fromTagPage(mediaMap);
-            medias.add(media);
-        }
-        return medias;
-    }
-
-    public List<Comment> getCommentsByMediaCode(String code, int count) throws IOException {
-        List<Comment> comments = new ArrayList<Comment>();
-        int index = 0;
-        String commentId = "0";
-        boolean hasNext = true;
-
-        while (index < count && hasNext) {
-            Request request = new Request.Builder()
-                    .url(Endpoint.getCommentsBeforeCommentIdByCode(code, 20, commentId))
-                    .header("Referer", Endpoint.BASE_URL + "/")
-                    .build();
-
-            Response response = this.httpClient.newCall(withCsrfToken(request)).execute();
-            String jsonString = response.body().string();
-            response.body().close();
-
-            Map commentsMap = gson.fromJson(jsonString, Map.class);
-            List nodes = (List) ((Map) ((Map) ((Map) commentsMap.get("data")).get("shortcode_media")).get("edge_media_to_comment")).get("edges");
-            for (Object node : nodes) {
-                if (index == count) {
-                    return comments;
-                }
-                index++;
-                Map commentMap = (Map) node;
-                Comment comment = Comment.fromApi(commentMap);
-                comments.add(comment);
-            }
-            hasNext = (Boolean) ((Map) (((Map) ((Map) ((Map) commentsMap.get("data")).get("shortcode_media")).get("edge_media_to_comment"))).get("page_info")).get("has_next_page");
-            commentId = (String) ((Map) (((Map) ((Map) ((Map) commentsMap.get("data")).get("shortcode_media")).get("edge_media_to_comment"))).get("page_info")).get("end_cursor");
-        }
-        return comments;
+    public PageObject<Comment> getCommentsByMediaCode(String code, int pageCount) throws IOException {
+        GetCommentsByMediaCode getCommentsByMediaCode = new GetCommentsByMediaCode(httpClient, mapper, delayHandler);
+        return getCommentsByMediaCode.requestInstagramResult(new MediaCode(code), pageCount,
+                    new PageInfo(true,"0"));
     }
 
     public void likeMediaByCode(String code) throws IOException {
-        String url = Endpoint.getMediaLikeLink(Media.getIdFromCode(code));
+        String url = Endpoint.getMediaLikeLink(MediaUtil.getIdFromCode(code));
         Request request = new Request.Builder()
                 .url(url)
-                .header("Referer", Endpoint.getMediaPageLinkByCode(code) + "/")
+                .header(Endpoint.REFERER, Endpoint.getMediaPageLinkByCode(code) + "/")
                 .post(new FormBody.Builder().build())
                 .build();
 
@@ -297,92 +146,21 @@ public class Instagram implements AuthenticatedInsta {
         response.body().close();
     }
 
-    public List<Account> getFollows(long userId, int count) throws IOException {
-        boolean hasNext = true;
-        List<Account> follows = new ArrayList<Account>();
-        String followsLink = Endpoint.getFollowsLinkVariables(userId, 200, "");
-        while (follows.size() < count && hasNext) {
-            Request request = new Request.Builder()
-                    .url(followsLink)
-                    .header("Referer", Endpoint.BASE_URL + "/")
-                    .build();
-
-            Response response = this.httpClient.newCall(withCsrfToken(request)).execute();
-            String jsonString = response.body().string();
-            response.body().close();
-
-            Map commentsMap = gson.fromJson(jsonString, Map.class);
-            Map edgeFollow = (Map) ((Map) ((Map) commentsMap.get("data")).get("user")).get("edge_follow");
-            List edges = (List) edgeFollow.get("edges");
-            for (Object edgeObj : edges) {
-                Account account = account((Map) edgeObj);
-                follows.add(account);
-                if (count == follows.size()) {
-                    return follows;
-                }
-            }
-            boolean hasNexPage = (Boolean) ((Map) edgeFollow.get("page_info")).get("has_next_page");
-            if (hasNexPage) {
-                followsLink = Endpoint.getFollowsLinkVariables(userId, 200, (String) ((Map) edgeFollow.get("page_info")).get("end_cursor"));
-                hasNext = true;
-            } else {
-                hasNext = false;
-            }
-        }
-        return follows;
+    public PageObject<Account> getFollows(long userId, int pageCount) throws IOException {
+        GetFollowsRequest getFollowsRequest = new GetFollowsRequest(httpClient, mapper, delayHandler);
+        return getFollowsRequest.requestInstagramResult(new UserParameter(userId), pageCount, FIRST_PAGE);
     }
 
-    private Account account(Map edgeObj) {
-        Account account = new Account();
-        Map edgeNode = (Map) edgeObj.get("node");
-        account.id = Long.valueOf((String) edgeNode.get("id"));
-        account.username = (String) edgeNode.get("username");
-        account.profilePicUrl = (String) edgeNode.get("profile_pic_url");
-        account.isVerified = (Boolean) edgeNode.get("is_verified");
-        account.fullName = (String) edgeNode.get("full_name");
-        return account;
-    }
-
-    public List<Account> getFollowers(long userId, int count) throws IOException {
-        boolean hasNext = true;
-        List<Account> followers = new ArrayList<Account>();
-        String followsLink = Endpoint.getFollowersLinkVariables(userId, 200, "");
-        while (followers.size() < count && hasNext) {
-            Request request = new Request.Builder()
-                    .url(followsLink)
-                    .header("Referer", Endpoint.BASE_URL + "/")
-                    .build();
-
-            Response response = this.httpClient.newCall(withCsrfToken(request)).execute();
-            String jsonString = response.body().string();
-            response.body().close();
-
-            Map commentsMap = gson.fromJson(jsonString, Map.class);
-            Map edgeFollow = (Map) ((Map) ((Map) commentsMap.get("data")).get("user")).get("edge_followed_by");
-            List edges = (List) edgeFollow.get("edges");
-            for (Object edgeObj : edges) {
-                Account account = account((Map) edgeObj);
-                followers.add(account);
-                if (count == followers.size()) {
-                    return followers;
-                }
-            }
-            boolean hasNexPage = (Boolean) ((Map) edgeFollow.get("page_info")).get("has_next_page");
-            if (hasNexPage) {
-                followsLink = Endpoint.getFollowersLinkVariables(userId, 200, (String) ((Map) edgeFollow.get("page_info")).get("end_cursor"));
-                hasNext = true;
-            } else {
-                hasNext = false;
-            }
-        }
-        return followers;
+    public PageObject<Account> getFollowers(long userId, int pageCount) throws IOException {
+        GetFollowersRequest getFollowersRequest = new GetFollowersRequest(httpClient, mapper, delayHandler);
+        return getFollowersRequest.requestInstagramResult(new UserParameter(userId),pageCount, FIRST_PAGE);
     }
 
     public void unlikeMediaByCode(String code) throws IOException {
-        String url = Endpoint.getMediaUnlikeLink(Media.getIdFromCode(code));
+        String url = Endpoint.getMediaUnlikeLink(MediaUtil.getIdFromCode(code));
         Request request = new Request.Builder()
                 .url(url)
-                .header("Referer", Endpoint.getMediaPageLinkByCode(code) + "/")
+                .header(Endpoint.REFERER, Endpoint.getMediaPageLinkByCode(code) + "/")
                 .post(new FormBody.Builder().build())
                 .build();
 
@@ -390,30 +168,28 @@ public class Instagram implements AuthenticatedInsta {
         response.body().close();
     }
 
-    public Comment addMediaComment(String code, String commentText) throws IOException {
-        String url = Endpoint.addMediaCommentLink(Media.getIdFromCode(code));
+    public ActionResponse<Comment> addMediaComment(String code, String commentText) throws IOException {
+        String url = Endpoint.addMediaCommentLink(MediaUtil.getIdFromCode(code));
         FormBody formBody = new FormBody.Builder()
                 .add("comment_text", commentText)
                 .build();
         Request request = new Request.Builder()
                 .url(url)
-                .header("Referer", Endpoint.getMediaPageLinkByCode(code) + "/")
+                .header(Endpoint.REFERER, Endpoint.getMediaPageLinkByCode(code) + "/")
                 .post(formBody)
                 .build();
 
         Response response = this.httpClient.newCall(withCsrfToken(request)).execute();
-        String jsonString = response.body().string();
-        response.body().close();
-
-        Map commentMap = gson.fromJson(jsonString, Map.class);
-        return Comment.fromApi(commentMap);
+        try (ResponseBody responseBody = response.body()){
+            return mapper.mapMediaCommentResponse(responseBody.byteStream());
+        }
     }
 
     public void deleteMediaComment(String code, String commentId) throws IOException {
-        String url = Endpoint.deleteMediaCommentLink(Media.getIdFromCode(code), commentId);
+        String url = Endpoint.deleteMediaCommentLink(MediaUtil.getIdFromCode(code), commentId);
         Request request = new Request.Builder()
                 .url(url)
-                .header("Referer", Endpoint.getMediaPageLinkByCode(code) + "/")
+                .header(Endpoint.REFERER, Endpoint.getMediaPageLinkByCode(code) + "/")
                 .post(new FormBody.Builder().build())
                 .build();
 
