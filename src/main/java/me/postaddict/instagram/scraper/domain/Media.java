@@ -1,6 +1,7 @@
 package me.postaddict.instagram.scraper.domain;
 
 import me.postaddict.instagram.scraper.Endpoint;
+import me.postaddict.instagram.scraper.exception.InstagramPartialDataException;
 
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -132,7 +133,7 @@ public class Media {
         }
     }
 
-    public static Media fromMediaPage(Map pageMap) {
+    public static Media fromMediaPage(Map pageMap) throws InstagramPartialDataException {
         Media instance = new Media();
         instance.id = (String) pageMap.get("id");
         instance.type = TYPE_IMAGE;
@@ -164,6 +165,9 @@ public class Media {
         instance.shortcode = (String) pageMap.get("shortcode");
         instance.link = INSTAGRAM_URL + "p/" + instance.shortcode;
         Map edgeMediaToComment = (Map) pageMap.get("edge_media_to_comment");
+        if (edgeMediaToComment == null) {
+            throw new InstagramPartialDataException("Media key='edge_media_to_comment' does not exists. Try to retry request");
+        }
         instance.commentsCount = ((Double) edgeMediaToComment.get("count")).intValue();
         if(edgeMediaToComment.containsKey("edges") && edgeMediaToComment.size()>0){
             instance.previewCommentsList = new ArrayList<Comment>();
@@ -248,7 +252,7 @@ public class Media {
             e.printStackTrace();
         }
     }
-    
+
     private static void fillCarouselImageUrls(final CarouselMedia instance, String imageUrl) {
         URL url;
         try {
