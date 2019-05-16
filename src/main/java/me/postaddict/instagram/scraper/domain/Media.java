@@ -164,9 +164,13 @@ public class Media {
         fixDate(instance);
         instance.shortcode = (String) pageMap.get("shortcode");
         instance.link = INSTAGRAM_URL + "p/" + instance.shortcode;
-        Map edgeMediaToComment = (Map) pageMap.get("edge_media_to_comment");
-        if (edgeMediaToComment == null) {
-            throw new InstagramPartialDataException("Media key='edge_media_to_comment' does not exists. Try to retry request");
+        Map edgeMediaToComment;
+        if ((pageMap.containsKey("edge_media_to_comment"))) {
+            edgeMediaToComment = (Map) pageMap.get("edge_media_to_comment");
+        } else if (pageMap.containsKey("edge_media_to_parent_comment")) {
+            edgeMediaToComment = (Map) pageMap.get("edge_media_to_parent_comment");
+        } else {
+            throw new InstagramPartialDataException("Media keys=['edge_media_to_comment', 'edge_media_to_parent_comment'] do not exist.");
         }
         instance.commentsCount = ((Double) edgeMediaToComment.get("count")).intValue();
         if(edgeMediaToComment.containsKey("edges") && edgeMediaToComment.size()>0){
