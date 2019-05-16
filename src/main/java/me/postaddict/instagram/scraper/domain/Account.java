@@ -52,7 +52,11 @@ public class Account {
         Account instance = new Account();
         instance.id = Long.parseLong((String) userMap.get("id"));
         instance.username = (String) userMap.get("username");
-        instance.profilePicUrl = (String) userMap.get("profile_picture");
+        if (userMap.containsKey("profile_pic_url")) {
+            instance.profilePicUrl = (String) userMap.get("profile_pic_url");
+        } else if (userMap.containsKey("profile_picture")) {
+            instance.profilePicUrl = (String) userMap.get("profile_picture");
+        }
         instance.fullName = (String) userMap.get("full_name");
         if(instance.fullName == null){
             instance.fullName = instance.username;
